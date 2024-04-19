@@ -1,0 +1,11 @@
+name = "go"
+directory = "{{ .version }}"
+
+[executables]
+go="go/bin/go"
+
+[params]
+version="1.22.1"
+
+[tarball]
+url = "https://go.dev/dl/go{{ .version }}.linux-amd64.tar.gz"
