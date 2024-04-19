@@ -1,0 +1,10 @@
+name = "kubectl"
+directory = "{{ .version }}-{{ .platform }}-{{ .arch }}"
+
+[params]
+version="v1.30.0"
+arch="amd64"
+platform="linux"
+
+[binary]
+url = "https://dl.k8s.io/{{ .version }}/bin/{{ .platform }}/{{ .arch }}/kubectl"

@@ -1,4 +1,4 @@
-module github.com/mbooth/polymorph
+module github.com/mdbooth/polymorph
 
 go 1.22.1
 

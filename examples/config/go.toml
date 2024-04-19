@@ -1,11 +1,13 @@
 name = "go"
-directory = "{{ .version }}"
+directory = "{{ .version }}-{{ .platform }}-{{ .arch }}"
 
 [executables]
 go="go/bin/go"
 
 [params]
-version="1.22.1"
+version="1.22.2"
+arch="amd64"
+platform="linux"
 
 [tarball]
-url = "https://go.dev/dl/go{{ .version }}.linux-amd64.tar.gz"
+url = "https://go.dev/dl/go{{ .version }}.{{ .platform }}-{{ .arch }}.tar.gz"

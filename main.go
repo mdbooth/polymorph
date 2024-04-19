@@ -16,7 +16,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package main
 
-import "github.com/mbooth/polymorph/cmd"
+import "github.com/mdbooth/polymorph/cmd"
 
 func main() {
 	cmd.Execute()

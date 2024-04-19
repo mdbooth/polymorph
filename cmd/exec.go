@@ -17,20 +17,18 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path"
 	"syscall"
-	"text/template"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
+
+	"github.com/mdbooth/polymorph/pkg/binary"
+	"github.com/mdbooth/polymorph/pkg/tarball"
+	"github.com/mdbooth/polymorph/pkg/templates"
 )
 
 var execCmd = &cobra.Command{
@@ -53,11 +51,8 @@ type ExecTemplate struct {
 	Params      map[string]string `toml:"params"`
 	Executables map[string]string `toml:"executables"`
 
-	TarballFetcher TarballFetcher `toml:"tarball"`
-}
-
-type TarballFetcher struct {
-	URL string `toml:"url"`
+	TarballFetcher *tarball.Fetcher `toml:"tarball"`
+	BinaryFetcher  *binary.Fetcher  `toml:"binary"`
 }
 
 func runExec(_ *cobra.Command, args []string) error {
@@ -77,9 +72,6 @@ func runExec(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("error executing %s: %w", executableName, err)
 	}
 
-	if fetchFunc == nil {
-		return fmt.Errorf("no fetcher specified")
-	}
 	err = fetchFunc()
 	if err != nil {
 		return fmt.Errorf("error fetching %s: %w", executableName, err)
@@ -110,17 +102,10 @@ func getConfig(executableName string, templateFile string) (string, func() error
 		return "", nil, fmt.Errorf("error reading template %s: %s", templateFile, err)
 	}
 
-	directoryTmpl, err := template.New("directory").Parse(execTemplate.Directory)
+	directory, err := templates.ExpandTemplate(execTemplate.Directory, execTemplate.Params)
 	if err != nil {
-		return "", nil, fmt.Errorf("error parsing directory template from %s: %s", templateFile, err)
+		return "", nil, fmt.Errorf("error expanding directory template: %s", err)
 	}
-
-	// create a writer which writes to the string variable directory
-	var directoryBytes bytes.Buffer
-	if err := directoryTmpl.Execute(&directoryBytes, execTemplate.Params); err != nil {
-		return "", nil, fmt.Errorf("error executing directory template from %s: %s", templateFile, err)
-	}
-	directory := directoryBytes.String()
 
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
@@ -129,108 +114,43 @@ func getConfig(executableName string, templateFile string) (string, func() error
 	execCacheDir := path.Join(cacheDir, "polymorph", execTemplate.Name)
 	versionedCacheDir := path.Join(execCacheDir, directory)
 
+	executableBase := path.Base(executableName)
 	fetcher := func() error {
-		return tarballFetcher(&execTemplate.TarballFetcher, execCacheDir, directory, execTemplate.Params)
+		var err error
+		err = os.MkdirAll(execCacheDir, 0755)
+		if err != nil {
+			return fmt.Errorf("error creating cache dir %s: %w", cacheDir, err)
+		}
+
+		tempDir, err := os.MkdirTemp(execCacheDir, directory)
+		if err != nil {
+			return fmt.Errorf("error creating temporary directory %s: %w", path.Join(cacheDir, directory), err)
+		}
+		defer os.RemoveAll(tempDir)
+
+		switch {
+		case execTemplate.TarballFetcher != nil:
+			err = tarball.Fetch(execTemplate.TarballFetcher, execTemplate.Params, tempDir)
+
+		case execTemplate.BinaryFetcher != nil:
+			err = binary.Fetch(execTemplate.BinaryFetcher, execTemplate.Params, tempDir, executableBase)
+		default:
+			return fmt.Errorf("no fetcher specified")
+		}
+
+		if err != nil {
+			return err
+		}
+
+		return os.Rename(tempDir, versionedCacheDir)
 	}
 
-	executableBase := path.Base(executableName)
 	executable, ok := execTemplate.Executables[executableBase]
 	if !ok {
 		executable = executableBase
 	}
 
 	return path.Join(versionedCacheDir, executable), fetcher, nil
-}
-
-func tarballFetcher(fetcher *TarballFetcher, cacheDir, directory string, params map[string]string) error {
-	var err error
-	err = os.MkdirAll(cacheDir, 0755)
-	if err != nil {
-		return fmt.Errorf("error creating cache dir %s: %w", cacheDir, err)
-	}
-
-	tempDir, err := os.MkdirTemp(cacheDir, directory)
-	if err != nil {
-		return fmt.Errorf("error creating temporary directory %s: %w", path.Join(cacheDir, directory), err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	tarballURL, err := expandTemplate(fetcher.URL, params)
-	if err != nil {
-		return fmt.Errorf("error expanding tarball fetch url template: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Downloading tarball from %s...\n", tarballURL)
-
-	resp, err := http.Get(tarballURL)
-	if err != nil {
-		return fmt.Errorf("error downloading tarball %s: %w", tarballURL, err)
-	}
-	defer resp.Body.Close()
-
-	uncompressed, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error creating gzip reader: %w", err)
-	}
-	defer uncompressed.Close()
-
-	if err := untar(uncompressed, tempDir); err != nil {
-		return err
-	}
-
-	targetDir := path.Join(cacheDir, directory)
-	return os.Rename(tempDir, targetDir)
-}
-
-func untar(r io.Reader, dir string) error {
-	tarReader := tar.NewReader(r)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			return nil
-		} else if err != nil {
-			return fmt.Errorf("error reading tarball: %w", err)
-		}
-
-		target := path.Join(dir, header.Name)
-		mode := os.FileMode(header.Mode)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			err = os.MkdirAll(target, mode)
-			if err != nil {
-				return fmt.Errorf("error creating directory %s: %w", target, err)
-			}
-
-		case tar.TypeReg:
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, mode)
-			if err != nil {
-				return fmt.Errorf("error creating file %s: %w", target, err)
-			}
-
-			if _, err := io.Copy(f, tarReader); err != nil {
-				return fmt.Errorf("error writing file %s: %w", target, err)
-			}
-			if err := f.Close(); err != nil {
-				return fmt.Errorf("error closing file %s: %w", target, err)
-			}
-		}
-	}
-}
-
-func expandTemplate(templateString string, params map[string]string) (string, error) {
-	t, err := template.New("").Parse(templateString)
-	if err != nil {
-		return "", err
-	}
-
-	var buf bytes.Buffer
-	err = t.Execute(&buf, params)
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
 }
 
 func init() {
